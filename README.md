@@ -161,3 +161,4 @@ Design tokens are defined as CSS custom properties in `globals.css` and mirrored
 Font: **Inter** + **Noto Sans Malayalam** (Google Fonts).  
 Spacing rhythm: 8px. Minimum touch target: 44px. Tabular figures for monetary values.
 "# VELORA" 
+"# velora123" 
