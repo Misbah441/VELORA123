@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Page background */
+  --color-background: #FAF8F2;
+  /* Surface */
+  --color-surface: #FFFFFF;
+  /* Primary */
+  --color-primary: #174C3C;
+  --color-primary-hover: #103B2E;
+  /* Text */
+  --color-text-main: #202923;
+  --color-text-secondary: #53615A;
+  /* Muted surface */
+  --color-muted: #E8F0E9;
+  /* Accent */
+  --color-accent-surface: #FFF1D6;
+  --color-accent-text: #7A4700;
+  /* Status */
+  --color-danger: #B42318;
+  --color-information: #245B78;
+  /* Divider */
+  --color-divider: #D6DED7;
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+    font-family: var(--font-inter), var(--font-malayalam), sans-serif;
+    color: var(--color-text-main);
+    background-color: var(--color-background);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: var(--color-background);
+    color: var(--color-text-main);
+  }
+
+  /* Tabular figures for monetary values */
+  .tabular-nums,
+  [data-monetary] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 44px minimum touch target */
+  button,
+  a,
+  [role='button'],
+  input[type='submit'],
+  input[type='button'] {
+    min-height: 44px;
+  }
+
+  /* Reduced motion support */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Focus states */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  /* Headings */
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--color-text-main);
+    font-weight: 600;
+    line-height: 1.25;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* 8px spacing rhythm helpers */
+  .space-rhythm {
+    gap: 8px;
+  }
+}
