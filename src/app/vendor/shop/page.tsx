@@ -1,7 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -36,8 +35,6 @@ interface Product {
   available: boolean;
 }
 
-// ── Demo data ──────────────────────────────────────────────────────────────────
-
 const DAYS: DayKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 const defaultHours: Record<DayKey, DayHours> = {
@@ -49,15 +46,6 @@ const defaultHours: Record<DayKey, DayHours> = {
   Sat: { closed: false, open: '07:00', close: '18:00' },
   Sun: { closed: true, open: '09:00', close: '14:00' },
 };
-
-const initialProducts: Product[] = [
-  { id: '1', name: 'Tomatoes', unit: 'kg', price: 30, available: true },
-  { id: '2', name: 'Beans', unit: 'kg', price: 60, available: true },
-  { id: '3', name: 'Spinach', unit: 'bunch', price: 15, available: true },
-  { id: '4', name: 'Coconut', unit: 'piece', price: 25, available: false },
-  { id: '5', name: 'Raw Banana', unit: 'piece', price: 8, available: true },
-  { id: '6', name: 'Bitter Gourd', unit: 'kg', price: 40, available: true },
-];
 
 // ── Toggle component ───────────────────────────────────────────────────────────
 
@@ -93,19 +81,21 @@ function AvailabilityToggle({
 
 export default function ShopPage() {
   // Shop details state
-  const [shopName, setShopName] = useState('Rajan Vegetables');
-  const [description, setDescription] = useState(
-    'Fresh vegetables sourced daily from local farms. We specialise in seasonal produce.'
-  );
-  const [category, setCategory] = useState('Vegetables');
+  const [shopId, setShopId] = useState('');
+  const [shopSlug, setShopSlug] = useState('');
+  const [shopName, setShopName] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('produce');
   const [stallType, setStallType] = useState<StallType>('Fixed');
   const [hours, setHours] = useState<Record<DayKey, DayHours>>(defaultHours);
-  const [published, setPublished] = useState(true);
+  const [published, setPublished] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [savingDetails, setSavingDetails] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [loadingShop, setLoadingShop] = useState(true);
 
   // Products state
-  const [products, setProducts] = useState<Product[]>(initialProducts);
+  const [products, setProducts] = useState<Product[]>([]);
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -123,27 +113,52 @@ export default function ShopPage() {
 
   useEffect(() => {
     const supabase = createClient();
-    void supabase.auth.getUser().then(async ({ data }) => {
+    void supabase.auth.getUser().then(async ({ data, error: authError }) => {
+      if (authError) {
+        setActionError(authError.message);
+        setLoadingShop(false);
+        return;
+      }
       const userId = data.user?.id;
-      if (!userId) return;
-      const { data: shop } = await supabase
+      if (!userId) {
+        setLoadingShop(false);
+        return;
+      }
+      const { data: shop, error: shopError } = await supabase
         .from('shops')
-        .select('id,name,description,category,stall_type,status,opening_hours')
+        .select('id,slug,name,description,category,stall_type,status,opening_hours')
         .eq('owner_id', userId)
         .order('updated_at', { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (!shop) return;
+      if (shopError) {
+        setActionError(shopError.message);
+        setLoadingShop(false);
+        return;
+      }
+      if (!shop) {
+        setLoadingShop(false);
+        return;
+      }
+      setShopId(shop.id);
+      setShopSlug(shop.slug);
       setShopName(shop.name);
       setDescription(shop.description || '');
+      setCategory(shop.category);
+      setStallType(shop.stall_type === 'mobile' ? 'Mobile' : 'Fixed');
       setPublished(shop.status === 'published');
       if (shop.opening_hours) setHours(shop.opening_hours as Record<DayKey, DayHours>);
 
-      const { data: rows } = await supabase
+      const { data: rows, error: productsError } = await supabase
         .from('products')
         .select('id,name,unit,selling_price_paise,is_available')
         .eq('shop_id', shop.id)
         .order('created_at', { ascending: true });
+      if (productsError) {
+        setActionError(productsError.message);
+        setLoadingShop(false);
+        return;
+      }
       setProducts((rows || []).map((row) => ({
         id: row.id,
         name: row.name,
@@ -151,24 +166,32 @@ export default function ShopPage() {
         price: row.selling_price_paise / 100,
         available: row.is_available,
       })));
+      setLoadingShop(false);
     });
   }, []);
 
   async function handleSaveDetails() {
+    setActionError('');
+    if (!shopId) {
+      setActionError('Create your shop through onboarding before editing its details.');
+      return;
+    }
     setSavingDetails(true);
     const supabase = createClient();
-    const { data: user } = await supabase.auth.getUser();
-    const userId = user.user?.id;
-    if (userId) {
-      await supabase
-        .from('shops')
-        .update({
-          name: shopName,
-          description,
-          stall_type: stallType.toLowerCase(),
-          opening_hours: hours,
-        })
-        .eq('owner_id', userId);
+    const { error } = await supabase
+      .from('shops')
+      .update({
+        name: shopName.trim(),
+        description: description.trim() || null,
+        category,
+        stall_type: stallType.toLowerCase(),
+        opening_hours: hours,
+      })
+      .eq('id', shopId);
+    if (error) {
+      setActionError(error.message);
+      setSavingDetails(false);
+      return;
     }
     setSavingDetails(false);
     setEditOpen(false);
@@ -193,42 +216,36 @@ export default function ShopPage() {
   }
 
   async function handleAddProduct() {
-    if (!newName.trim() || !newPrice) return;
-    const supabase = createClient();
-    const { data: user } = await supabase.auth.getUser();
-    const userId = user.user?.id;
-    if (userId) {
-      const { data: shop } = await supabase
-        .from('shops')
-        .select('id')
-        .eq('owner_id', userId)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (shop) {
-        const { data: row } = await supabase
-          .from('products')
-          .insert({
-            shop_id: shop.id,
-            name: newName.trim(),
-            unit: newUnit,
-            selling_price_paise: Math.round(parseFloat(newPrice) * 100),
-            is_available: true,
-          })
-          .select('id')
-          .single();
-        setProducts((prev) => [
-          ...prev,
-          {
-            id: row?.id || crypto.randomUUID(),
-            name: newName.trim(),
-            unit: newUnit,
-            price: parseFloat(newPrice),
-            available: true,
-          },
-        ]);
-      }
+    setActionError('');
+    const price = Number(newPrice);
+    if (!shopId) {
+      setActionError('Create your shop through onboarding before adding products.');
+      return;
     }
+    if (!newName.trim() || !Number.isFinite(price) || price <= 0) {
+      setActionError('Enter a product name and a valid price above zero.');
+      return;
+    }
+    const supabase = createClient();
+    const { data: row, error } = await supabase
+      .from('products')
+      .insert({
+        shop_id: shopId,
+        name: newName.trim(),
+        unit: newUnit,
+        selling_price_paise: Math.round(price * 100),
+        is_available: true,
+      })
+      .select('id')
+      .single();
+    if (error) {
+      setActionError(error.message);
+      return;
+    }
+    setProducts((prev) => [
+      ...prev,
+      { id: row.id, name: newName.trim(), unit: newUnit, price, available: true },
+    ]);
     setNewName('');
     setNewUnit('kg');
     setNewPrice('');
@@ -243,16 +260,26 @@ export default function ShopPage() {
   }
 
   async function handleSaveEdit(id: string) {
+    setActionError('');
+    const price = Number(editPrice);
+    if (!editName.trim() || !Number.isFinite(price) || price <= 0) {
+      setActionError('Enter a product name and a valid price above zero.');
+      return;
+    }
     const supabase = createClient();
-    await supabase.from('products').update({
+    const { error } = await supabase.from('products').update({
       name: editName.trim(),
       unit: editUnit,
-      selling_price_paise: Math.round(parseFloat(editPrice) * 100),
+      selling_price_paise: Math.round(price * 100),
     }).eq('id', id);
+    if (error) {
+      setActionError(error.message);
+      return;
+    }
     setProducts((prev) =>
       prev.map((p) =>
         p.id === id
-          ? { ...p, name: editName.trim(), unit: editUnit, price: parseFloat(editPrice) }
+          ? { ...p, name: editName.trim(), unit: editUnit, price }
           : p
       )
     );
@@ -260,7 +287,11 @@ export default function ShopPage() {
   }
 
   async function handleDelete(id: string) {
-    await createClient().from('products').delete().eq('id', id);
+    const { error } = await createClient().from('products').delete().eq('id', id);
+    if (error) {
+      setActionError(error.message);
+      return;
+    }
     setProducts((prev) => prev.filter((p) => p.id !== id));
     setDeleteConfirmId(null);
   }
@@ -268,7 +299,11 @@ export default function ShopPage() {
   async function handleToggleAvailability(id: string) {
     const current = products.find((product) => product.id === id);
     if (current) {
-      await createClient().from('products').update({ is_available: !current.available }).eq('id', id);
+      const { error } = await createClient().from('products').update({ is_available: !current.available }).eq('id', id);
+      if (error) {
+        setActionError(error.message);
+        return;
+      }
     }
     setProducts((prev) =>
       prev.map((p) => (p.id === id ? { ...p, available: !p.available } : p))
@@ -279,10 +314,14 @@ export default function ShopPage() {
     if (published) {
       setUnpublishWarning(true);
     } else {
-      const supabase = createClient();
-      const { data } = await supabase.auth.getUser();
-      if (data.user) {
-        await supabase.from('shops').update({ status: 'published' }).eq('owner_id', data.user.id);
+      if (!shopId) {
+        setActionError('Complete shop onboarding before publishing.');
+        return;
+      }
+      const { error } = await createClient().from('shops').update({ status: 'published' }).eq('id', shopId);
+      if (error) {
+        setActionError(error.message);
+        return;
       }
       setPublished(true);
     }
@@ -300,6 +339,18 @@ export default function ShopPage() {
           Manage your shop details and products
         </p>
       </div>
+      {actionError && (
+        <p role="alert" className="rounded-md border border-danger/30 bg-red-50 p-3 text-sm text-danger">
+          {actionError}
+        </p>
+      )}
+      {!shopId && (
+        <Card className="text-sm text-text-secondary">
+          {loadingShop
+            ? 'Loading your shop...'
+            : 'No shop is linked to this account yet. Complete vendor onboarding to create one.'}
+        </Card>
+      )}
 
       {/* ── SHOP DETAILS ── */}
       <section>
@@ -317,7 +368,9 @@ export default function ShopPage() {
                 </Badge>
                 <Badge variant="muted">{stallType}</Badge>
               </div>
-              <p className="text-sm text-text-secondary">{category}</p>
+              <p className="text-sm text-text-secondary">
+                {category.replaceAll('_', ' ')}
+              </p>
               <p className="text-sm text-text-secondary">{description}</p>
             </div>
 
@@ -332,7 +385,7 @@ export default function ShopPage() {
                 {editOpen ? 'Cancel' : 'Edit details'}
               </Button>
               <a
-                href="/shops/rajan-vegetables"
+                href={shopSlug ? `/shops/${shopSlug}` : '/shops'}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
@@ -375,12 +428,12 @@ export default function ShopPage() {
                   onChange={(e) => setCategory(e.target.value)}
                   className="w-full rounded-md border border-divider bg-surface px-3 py-2 text-base text-text-main focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary min-h-[44px]"
                 >
-                  <option>Vegetables</option>
-                  <option>Fruits</option>
-                  <option>Dairy</option>
-                  <option>Fish &amp; Meat</option>
-                  <option>Groceries</option>
-                  <option>Snacks</option>
+                  <option value="produce">Produce</option>
+                  <option value="food_stall">Food stall</option>
+                  <option value="grocery">Grocery</option>
+                  <option value="clothing">Clothing</option>
+                  <option value="household_goods">Household goods</option>
+                  <option value="other">Other</option>
                 </select>
               </div>
               <div>
@@ -702,10 +755,15 @@ export default function ShopPage() {
                       variant="danger"
                       size="sm"
                       onClick={async () => {
-                        const supabase = createClient();
-                        const { data } = await supabase.auth.getUser();
-                        if (data.user) {
-                          await supabase.from('shops').update({ status: 'paused' }).eq('owner_id', data.user.id);
+                        setActionError('');
+                        if (!shopId) return;
+                        const { error } = await createClient()
+                          .from('shops')
+                          .update({ status: 'paused' })
+                          .eq('id', shopId);
+                        if (error) {
+                          setActionError(error.message);
+                          return;
                         }
                         setPublished(false);
                         setUnpublishWarning(false);

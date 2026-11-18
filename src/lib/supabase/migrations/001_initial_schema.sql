@@ -372,6 +372,8 @@ CREATE INDEX IF NOT EXISTS idx_buy_contributions_group_id  ON buy_contributions 
 CREATE INDEX IF NOT EXISTS idx_buy_contributions_member_id ON buy_contributions (member_id);
 
 CREATE INDEX IF NOT EXISTS idx_support_resources_is_published ON support_resources (is_published);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_support_resources_title_url
+  ON support_resources (title, official_url);
 
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_id ON notifications (recipient_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_is_read      ON notifications (is_read);
@@ -402,6 +404,35 @@ ALTER TABLE notifications      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_events       ENABLE ROW LEVEL SECURITY;
 
 -- ─── RLS Policies ────────────────────────────────────────────────────────────
+
+DO $$
+DECLARE
+  existing_policy RECORD;
+BEGIN
+  FOR existing_policy IN
+    SELECT policyname, tablename
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND policyname IN (
+        'vendor_profiles_owner_select', 'vendor_profiles_owner_insert', 'vendor_profiles_owner_update',
+        'vendor_settings_owner_all', 'shops_anon_select_published', 'shops_owner_all',
+        'products_anon_select_published', 'products_owner_all', 'product_costs_owner_all',
+        'inventory_owner_all', 'ledger_entries_owner_select', 'ledger_entries_owner_insert',
+        'credit_customers_owner_all', 'credit_events_owner_all', 'surplus_listings_anon_select_active',
+        'surplus_listings_owner_all', 'reservations_owner_all', 'enquiries_owner_select',
+        'enquiries_owner_update', 'enquiries_public_insert', 'buy_groups_auth_select',
+        'buy_groups_organizer_all', 'buy_group_members_member_select',
+        'buy_group_members_organizer_select', 'buy_group_members_member_insert',
+        'buy_group_members_organizer_update', 'supplier_offers_auth_select',
+        'supplier_offers_organizer_all', 'buy_contributions_member_all',
+        'support_resources_auth_select_published', 'notifications_recipient_select',
+        'notifications_recipient_update', 'audit_events_owner_select'
+      )
+  LOOP
+    EXECUTE format('DROP POLICY %I ON public.%I', existing_policy.policyname, existing_policy.tablename);
+  END LOOP;
+END;
+$$;
 
 -- vendor_profiles: owner only
 CREATE POLICY "vendor_profiles_owner_select" ON vendor_profiles
@@ -572,7 +603,11 @@ BEGIN
   new_slug := trim(both '-' FROM regexp_replace(
     lower(coalesce(shop_data->>'name', '')),
     '[^a-z0-9]+', '-', 'g'
-  )) || '-' || left(vendor_id::text, 8);
+  ));
+  IF new_slug = '' THEN
+    new_slug := 'shop';
+  END IF;
+  new_slug := new_slug || '-' || left(vendor_id::text, 8);
 
   INSERT INTO shops (
     owner_id, name, slug, category, description, stall_type, service_area,
@@ -632,6 +667,10 @@ CREATE POLICY "enquiries_public_insert" ON enquiries
     length(trim(sender_name)) BETWEEN 1 AND 100
     AND length(trim(sender_contact)) BETWEEN 3 AND 160
     AND length(trim(message)) BETWEEN 3 AND 2000
+    AND EXISTS (
+      SELECT 1 FROM shops s
+      WHERE s.id = enquiries.shop_id AND s.status = 'published'
+    )
   );
 
 -- Public calls reserve stock atomically. It also returns a private opaque token.
@@ -677,7 +716,7 @@ BEGIN
       updated_at = now()
   WHERE id = p_listing_id;
 
-  token := encode(gen_random_bytes(24), 'hex');
+  token := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
   INSERT INTO reservations (
     listing_id, quantity, customer_contact, status, secure_token, expiry
   ) VALUES (
@@ -719,7 +758,7 @@ AS $$
   FROM reservations r
   JOIN surplus_listings sl ON sl.id = r.listing_id
   WHERE r.secure_token = p_token
-    AND length(p_token) = 48
+    AND length(p_token) = 64
   LIMIT 1;
 $$;
 
@@ -740,7 +779,7 @@ DECLARE
   r reservations%ROWTYPE;
   listing_owner UUID;
 BEGIN
-  SELECT r2.*, sl.owner_id
+  SELECT r2, sl.owner_id
   INTO r, listing_owner
   FROM reservations r2
   JOIN surplus_listings sl ON sl.id = r2.listing_id
@@ -834,6 +873,27 @@ SET public = true,
     file_size_limit = 5242880,
     allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp'];
 
+DO $$
+DECLARE
+  existing_policy RECORD;
+BEGIN
+  FOR existing_policy IN
+    SELECT policyname
+    FROM pg_policies
+    WHERE schemaname = 'storage'
+      AND tablename = 'objects'
+      AND policyname IN (
+        'product_images_public_read',
+        'product_images_owner_insert',
+        'product_images_owner_update',
+        'product_images_owner_delete'
+      )
+  LOOP
+    EXECUTE format('DROP POLICY %I ON storage.objects', existing_policy.policyname);
+  END LOOP;
+END;
+$$;
+
 CREATE POLICY "product_images_public_read"
 ON storage.objects FOR SELECT
 USING (bucket_id = 'product-images');
@@ -918,4 +978,4 @@ INSERT INTO support_resources (
   '2026-10-01',
   true
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (title, official_url) DO NOTHING;
