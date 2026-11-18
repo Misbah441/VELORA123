@@ -231,6 +231,16 @@ export interface Notification {
   created_at: string;
 }
 
+export interface Enquiry {
+  id: string;
+  shop_id: string;
+  sender_name: string;
+  sender_contact: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+}
+
 // ─── Database interface (for Supabase client typing) ─────────────────────────
 
 export interface Database {
@@ -301,6 +311,11 @@ export interface Database {
         Insert: Omit<SupportResource, 'id' | 'created_at' | 'updated_at'>;
         Update: Partial<Omit<SupportResource, 'id' | 'created_at'>>;
       };
+      enquiries: {
+        Row: Enquiry;
+        Insert: Omit<Enquiry, 'id' | 'is_read' | 'created_at'> & Partial<Pick<Enquiry, 'is_read'>>;
+        Update: Partial<Pick<Enquiry, 'is_read'>>;
+      };
       notifications: {
         Row: Notification;
         Insert: Omit<Notification, 'id' | 'created_at'>;
@@ -308,7 +323,45 @@ export interface Database {
       };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      publish_vendor_shop: {
+        Args: {
+          shop_data: Json;
+          product_data: Json;
+        };
+        Returns: Json;
+      };
+      create_reservation: {
+        Args: {
+          p_listing_id: string;
+          p_quantity: number;
+          p_customer_contact: string;
+        };
+        Returns: Json;
+      };
+      get_reservation: {
+        Args: { p_token: string };
+        Returns: Json;
+      };
+      transition_reservation: {
+        Args: {
+          p_reservation_id: string;
+          p_status: ReservationStatus;
+        };
+        Returns: undefined;
+      };
+      add_ledger_entry: {
+        Args: {
+          p_amount_paise: number;
+          p_entry_type: LedgerEntryType;
+          p_payment_method: PaymentMethod;
+          p_description: string;
+          p_entry_date: string;
+          p_idempotency_key: string;
+        };
+        Returns: LedgerEntry;
+      };
+    };
     Enums: {
       shop_category: ShopCategory;
       shop_status: ShopStatus;

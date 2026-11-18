@@ -7,6 +7,7 @@ import { Eye, EyeOff, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { cn } from '@/lib/utils';
+import { createClient } from '@/lib/supabase/client';
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams();
@@ -35,9 +36,18 @@ function ResetPasswordForm() {
       return;
     }
     setStep1Loading(true);
-    await new Promise((r) => setTimeout(r, 1000));
-    setStep1Loading(false);
-    setStep1Success(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+        redirectTo: `${window.location.origin}/auth/callback?next=/vendor/reset-password%3Fstep=new-password`,
+      });
+      if (error) throw error;
+      setStep1Success(true);
+    } catch (error) {
+      setStep1Error(error instanceof Error ? error.message : 'Unable to send reset email.');
+    } finally {
+      setStep1Loading(false);
+    }
   }
 
   async function handleStep2(e: React.FormEvent) {
@@ -56,9 +66,16 @@ function ResetPasswordForm() {
       return;
     }
     setStep2Loading(true);
-    await new Promise((r) => setTimeout(r, 1000));
-    setStep2Loading(false);
-    setStep2Success(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setStep2Success(true);
+    } catch (error) {
+      setStep2Error(error instanceof Error ? error.message : 'Unable to update password.');
+    } finally {
+      setStep2Loading(false);
+    }
   }
 
   return (

@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import {
   TrendingUp,
   Smartphone,
@@ -13,11 +12,15 @@ import {
   Eye,
   Package,
   AlertCircle,
+  ArrowUpRight,
+  ArrowDownRight,
+  CheckCircle2,
 } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/utils';
+import { createClient } from '@/lib/supabase/client';
 
 // ─── Demo Data ────────────────────────────────────────────────────────────────
 
@@ -121,23 +124,15 @@ const typeBadgeVariant: Record<EntryType, 'success' | 'warning' | 'info'> = {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VendorDashboardPage() {
-  const router = useRouter();
   const [vendorName, setVendorName] = useState('Vendor');
 
   useEffect(() => {
-    const stored = localStorage.getItem('vendor-market-user');
-    if (!stored) {
-      router.replace('/vendor/sign-in');
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(stored) as { fullName?: string };
-      if (parsed.fullName) setVendorName(parsed.fullName);
-    } catch {
-      router.replace('/vendor/sign-in');
-    }
-  }, [router]);
+    const supabase = createClient();
+    void supabase.auth.getUser().then(({ data }) => {
+      const name = data.user?.user_metadata?.display_name;
+      if (typeof name === 'string' && name.trim()) setVendorName(name.trim());
+    });
+  }, []);
 
   return (
     <div className="min-h-screen bg-background px-4 py-6 max-w-3xl mx-auto space-y-8">

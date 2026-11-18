@@ -1,55 +1,66 @@
-import type { Metadata } from 'next';
+'use client';
+
+import { useEffect, useState } from 'react';
 import { ClipboardList } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { ErrorState } from '@/components/ui/ErrorState';
 
-interface PageProps {
-  params: { token: string };
-}
+export default function ReservationTrackingPage({ params }: { params: { token: string } }) {
+  const [reservation, setReservation] = useState<Record<string, unknown> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
-export async function generateMetadata(): Promise<Metadata> {
-  return { title: 'Reservation status' };
-}
+  useEffect(() => {
+    void fetch(`/api/reservations/${encodeURIComponent(params.token)}`)
+      .then(async (response) => ({ ok: response.ok, data: await response.json() }))
+      .then(({ ok, data }) => {
+        setReservation(ok ? data.reservation : null);
+        setError(!ok);
+        setLoading(false);
+      })
+      .catch(() => {
+        setError(true);
+        setLoading(false);
+      });
+  }, [params.token]);
 
-export default function ReservationTrackingPage({ params }: PageProps) {
+  if (loading) return <main className="p-8 text-sm text-text-secondary">Loading reservation...</main>;
+  if (error || !reservation) {
+    return (
+      <main className="max-w-lg mx-auto px-4 py-12">
+        <ErrorState title="Reservation not found" description="The reference is invalid or expired." />
+      </main>
+    );
+  }
+
+  const listing = reservation.listing as { discounted_price_paise: number; pickup_instructions: string | null };
   return (
-    <div className="max-w-lg mx-auto px-4 py-12">
+    <main className="max-w-lg mx-auto px-4 py-12">
       <div className="text-center mb-8">
         <div className="size-16 rounded-full bg-muted mx-auto flex items-center justify-center mb-4">
-          <ClipboardList className="size-8 text-primary" aria-hidden />
+          <ClipboardList className="size-8 text-primary" />
         </div>
-        <h1 className="text-2xl font-bold text-text-main">Reservation status</h1>
-        <p className="text-text-secondary text-sm mt-1">
-          Reference: <code className="text-primary font-mono">{params.token}</code>
-        </p>
+        <h1 className="text-2xl font-bold">Reservation status</h1>
+        <p className="text-sm text-text-secondary mt-1">Private reference: {params.token.slice(0, 12)}...</p>
       </div>
-
       <Card className="space-y-4">
         <div className="flex items-center justify-between">
           <span className="text-sm text-text-secondary">Status</span>
-          <Badge variant="warning">Pending confirmation</Badge>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-text-secondary">Item</span>
-          <span className="text-sm font-medium text-text-main">—</span>
+          <Badge variant="warning">{String(reservation.status)}</Badge>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-sm text-text-secondary">Quantity</span>
-          <span className="text-sm font-medium text-text-main">—</span>
+          <span className="font-medium">{String(reservation.quantity)}</span>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-sm text-text-secondary">Collect by</span>
-          <span className="text-sm font-medium text-text-main">—</span>
+          <span className="text-sm text-text-secondary">Reserved price</span>
+          <span className="font-medium">₹{(listing.discounted_price_paise / 100).toFixed(2)}</span>
         </div>
-
-        <div className="pt-4 border-t border-divider">
-          <p className="text-xs text-text-secondary">
-            This page is accessible only with this private token. Do not share
-            it with others. The vendor will confirm your reservation — please
-            check back later.
-          </p>
-        </div>
+        {listing.pickup_instructions && (
+          <p className="text-sm text-text-secondary border-t border-divider pt-4">{listing.pickup_instructions}</p>
+        )}
       </Card>
-    </div>
+    </main>
   );
 }

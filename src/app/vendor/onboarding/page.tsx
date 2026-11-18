@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { cn } from '@/lib/utils';
+import { createClient } from '@/lib/supabase/client';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -608,12 +609,16 @@ function Step5({ form, setForm }: { form: FormData; setForm: React.Dispatch<Reac
 function Step6({
   form,
   onPublish,
+  onSaveDraft,
   isPublishing,
+  isComplete,
   published,
 }: {
   form: FormData;
   onPublish: () => void;
+  onSaveDraft: () => void;
   isPublishing: boolean;
+  isComplete: boolean;
   published: boolean;
 }) {
   const openDays = DAYS.filter((d) => !form.hours[d].closed);
@@ -624,14 +629,21 @@ function Step6({
       ? `Mon–Sun ${form.hours['Mon'].open}–${form.hours['Mon'].close}`
       : openDays.map((d) => `${d} ${form.hours[d].open}–${form.hours[d].close}`).join(', ');
 
-  if (published) {
+  if (isComplete) {
     return (
       <div className="flex flex-col items-center gap-4 py-8 text-center">
         <div className="rounded-full bg-muted p-4">
           <CheckCircle2 size={40} className="text-primary" />
         </div>
-        <h2 className="text-2xl font-bold text-text-main">Your shop is live!</h2>
-        <p className="text-text-secondary">Redirecting to dashboard…</p>
+        <h2 className="text-2xl font-bold text-text-main">
+          {published ? 'Your shop is live!' : 'Your draft is saved.'}
+        </h2>
+        <p className="text-text-secondary">
+          {published ? 'Customers can now find your shop.' : 'You can publish it from your shop settings.'}
+        </p>
+        <Link href="/vendor" className="text-primary font-medium hover:underline">
+          Go to dashboard
+        </Link>
       </div>
     );
   }
@@ -707,7 +719,14 @@ function Step6({
         >
           Publish shop
         </Button>
-        <Button type="button" variant="ghost" className="sm:flex-1">
+        <Button
+          type="button"
+          variant="ghost"
+          className="sm:flex-1"
+          isLoading={isPublishing}
+          disabled={isPublishing}
+          onClick={onSaveDraft}
+        >
           Save as draft
         </Button>
       </div>
@@ -743,12 +762,69 @@ export default function OnboardingPage() {
   const [form, setForm] = useState<FormData>(initialForm);
   const [isPublishing, setIsPublishing] = useState(false);
   const [published, setPublished] = useState(false);
+  const [isComplete, setIsComplete] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
-  async function handlePublish() {
+  async function saveShop(publish: boolean) {
+    setSaveError('');
     setIsPublishing(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setIsPublishing(false);
-    setPublished(true);
+    try {
+      const supabase = createClient();
+      const categoryByType: Record<Exclude<ShopType, ''>, string> = {
+        Produce: 'produce',
+        'Food Stall': 'food_stall',
+        Grocery: 'grocery',
+        Clothing: 'clothing',
+        Household: 'household_goods',
+        Other: 'other',
+      };
+      const { data, error } = await supabase.rpc('publish_vendor_shop', {
+        shop_data: {
+          display_name: form.displayName.trim(),
+          preferred_language: form.language,
+          name: form.shopName.trim(),
+          category: form.shopType ? categoryByType[form.shopType] : 'other',
+          description: form.description.trim(),
+          stall_type: form.stallType,
+          service_area: form.locality.trim(),
+          public_location: form.address.trim(),
+          opening_hours: form.hours,
+          public_contact_preference: form.contactType,
+          public_contact_value: form.contactValue.trim(),
+          publish,
+        },
+        product_data: form.products.map((product) => ({
+          name: product.name.trim(),
+          unit: product.unit,
+          price: product.price,
+          available: product.available,
+        })),
+      });
+
+      if (error) throw error;
+      if (!data || typeof data !== 'object' || Array.isArray(data) || !('slug' in data)) {
+        throw new Error('The shop was saved, but the server returned an invalid response.');
+      }
+
+      setPublished(publish);
+      setIsComplete(true);
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to save your shop. Check your connection and try again.'
+      );
+    } finally {
+      setIsPublishing(false);
+    }
+  }
+
+  function handlePublish() {
+    void saveShop(true);
+  }
+
+  function handleSaveDraft() {
+    void saveShop(false);
   }
 
   const canNext = isStepValid(currentStep, form);
@@ -760,7 +836,14 @@ export default function OnboardingPage() {
       case 3: return <Step3 form={form} setForm={setForm} />;
       case 4: return <Step4 form={form} setForm={setForm} />;
       case 5: return <Step5 form={form} setForm={setForm} />;
-      case 6: return <Step6 form={form} onPublish={handlePublish} isPublishing={isPublishing} published={published} />;
+      case 6: return <Step6
+        form={form}
+        onPublish={handlePublish}
+        onSaveDraft={handleSaveDraft}
+        isPublishing={isPublishing}
+        isComplete={isComplete}
+        published={published}
+      />;
       default: return null;
     }
   }
@@ -784,10 +867,15 @@ export default function OnboardingPage() {
         {/* Step content */}
         <div className="bg-surface rounded-lg border border-divider p-6 sm:p-8 mb-6">
           {renderStep()}
+          {saveError && (
+            <div className="mt-4 rounded-md border border-danger/30 bg-red-50 p-3 text-sm text-danger" role="alert">
+              {saveError}
+            </div>
+          )}
         </div>
 
         {/* Navigation */}
-        {!published && (
+        {!isComplete && (
           <div className="flex items-center justify-between">
             <Button
               type="button"

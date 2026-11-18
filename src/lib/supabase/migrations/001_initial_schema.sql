@@ -532,3 +532,390 @@ CREATE POLICY "notifications_recipient_update" ON notifications
 -- audit_events: owner can view their own audit rows; no insert/update from client
 CREATE POLICY "audit_events_owner_select" ON audit_events
   FOR SELECT USING (auth.uid() = actor_id);
+
+-- Create a complete shop in one transaction. If a product is invalid, the shop
+-- and all prior products from this call are rolled back together.
+CREATE OR REPLACE FUNCTION public.publish_vendor_shop(shop_data JSONB, product_data JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  vendor_id UUID := auth.uid();
+  new_shop_id UUID;
+  new_slug TEXT;
+  item JSONB;
+  item_name TEXT;
+  item_price NUMERIC;
+BEGIN
+  IF vendor_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF jsonb_typeof(shop_data) <> 'object'
+     OR jsonb_typeof(product_data) <> 'array'
+     OR jsonb_array_length(product_data) < 1
+     OR jsonb_array_length(product_data) > 100 THEN
+    RAISE EXCEPTION 'Shop data must include between 1 and 100 products';
+  END IF;
+  IF length(trim(coalesce(shop_data->>'display_name', ''))) = 0
+     OR length(trim(coalesce(shop_data->>'name', ''))) = 0
+     OR length(trim(coalesce(shop_data->>'service_area', ''))) = 0 THEN
+    RAISE EXCEPTION 'Owner name, shop name, and service area are required';
+  END IF;
+
+  UPDATE vendor_profiles
+  SET display_name = left(trim(shop_data->>'display_name'), 100),
+      preferred_language = CASE WHEN shop_data->>'preferred_language' = 'ml' THEN 'ml' ELSE 'en' END,
+      updated_at = now()
+  WHERE id = vendor_id;
+
+  new_slug := trim(both '-' FROM regexp_replace(
+    lower(coalesce(shop_data->>'name', '')),
+    '[^a-z0-9]+', '-', 'g'
+  )) || '-' || left(vendor_id::text, 8);
+
+  INSERT INTO shops (
+    owner_id, name, slug, category, description, stall_type, service_area,
+    public_location, opening_hours, public_contact_preference,
+    public_contact_value, status
+  ) VALUES (
+    vendor_id,
+    left(trim(shop_data->>'name'), 100),
+    new_slug,
+    (shop_data->>'category')::shop_category,
+    nullif(left(trim(shop_data->>'description'), 1000), ''),
+    (shop_data->>'stall_type')::stall_type,
+    left(trim(shop_data->>'service_area'), 160),
+    nullif(left(trim(shop_data->>'public_location'), 300), ''),
+    coalesce(shop_data->'opening_hours', '{}'::jsonb),
+    CASE WHEN shop_data->>'public_contact_preference' IN ('phone', 'whatsapp') THEN 'phone'
+         WHEN shop_data->>'public_contact_preference' = 'email' THEN 'email'
+         ELSE 'none' END,
+    CASE WHEN shop_data->>'public_contact_preference' = 'none' THEN NULL
+         ELSE nullif(left(trim(shop_data->>'public_contact_value'), 120), '') END,
+    'draft'
+  ) RETURNING id INTO new_shop_id;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(product_data)
+  LOOP
+    item_name := left(trim(item->>'name'), 100);
+    item_price := (item->>'price')::numeric;
+    IF item_name = '' OR item_price <= 0 OR item_price > 10000000
+       OR item->>'unit' IS NULL OR length(item->>'unit') > 24 THEN
+      RAISE EXCEPTION 'A product has invalid name, price, or unit';
+    END IF;
+
+    INSERT INTO products (
+      shop_id, name, category, selling_price_paise, unit, is_available
+    ) VALUES (
+      new_shop_id, item_name, nullif(left(item->>'category', 80), ''),
+      round(item_price * 100)::integer, item->>'unit',
+      coalesce((item->>'available')::boolean, true)
+    );
+  END LOOP;
+
+  UPDATE shops
+  SET status = CASE WHEN shop_data->>'publish' = 'false' THEN 'draft'::shop_status
+                    ELSE 'published'::shop_status END,
+      updated_at = now()
+  WHERE id = new_shop_id;
+  RETURN jsonb_build_object('shop_id', new_shop_id, 'slug', new_slug);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.publish_vendor_shop(JSONB, JSONB) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.publish_vendor_shop(JSONB, JSONB) TO authenticated;
+
+-- Public enquiries can only create a minimal, validated request.
+CREATE POLICY "enquiries_public_insert" ON enquiries
+  FOR INSERT WITH CHECK (
+    length(trim(sender_name)) BETWEEN 1 AND 100
+    AND length(trim(sender_contact)) BETWEEN 3 AND 160
+    AND length(trim(message)) BETWEEN 3 AND 2000
+  );
+
+-- Public calls reserve stock atomically. It also returns a private opaque token.
+CREATE OR REPLACE FUNCTION public.create_reservation(
+  p_listing_id UUID,
+  p_quantity INTEGER,
+  p_customer_contact TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  listing surplus_listings%ROWTYPE;
+  token TEXT;
+  reservation_id UUID;
+BEGIN
+  IF p_quantity IS NULL OR p_quantity <= 0 OR p_quantity > 100 THEN
+    RAISE EXCEPTION 'Quantity must be between 1 and 100';
+  END IF;
+  IF length(trim(coalesce(p_customer_contact, ''))) < 3
+     OR length(p_customer_contact) > 160 THEN
+    RAISE EXCEPTION 'A valid contact is required';
+  END IF;
+
+  SELECT * INTO listing
+  FROM surplus_listings
+  WHERE id = p_listing_id
+    AND status = 'active'
+    AND collection_deadline > now()
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'This surplus listing is no longer available';
+  END IF;
+  IF listing.eligible_quantity - listing.reserved_quantity < p_quantity THEN
+    RAISE EXCEPTION 'Not enough stock is available';
+  END IF;
+
+  UPDATE surplus_listings
+  SET reserved_quantity = reserved_quantity + p_quantity,
+      updated_at = now()
+  WHERE id = p_listing_id;
+
+  token := encode(gen_random_bytes(24), 'hex');
+  INSERT INTO reservations (
+    listing_id, quantity, customer_contact, status, secure_token, expiry
+  ) VALUES (
+    p_listing_id, p_quantity, trim(p_customer_contact), 'pending',
+    token, listing.collection_deadline
+  ) RETURNING id INTO reservation_id;
+
+  INSERT INTO notifications (
+    recipient_id, event_type, title, body
+  ) VALUES (
+    listing.owner_id, 'reservation',
+    'New reservation request',
+    p_quantity || ' item(s) requested'
+  );
+
+  RETURN jsonb_build_object('reservation_id', reservation_id, 'token', token);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_reservation(UUID, INTEGER, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_reservation(UUID, INTEGER, TEXT) TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.get_reservation(p_token TEXT)
+RETURNS JSONB
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT jsonb_build_object(
+    'id', r.id,
+    'quantity', r.quantity,
+    'status', r.status,
+    'expiry', r.expiry,
+    'listing', jsonb_build_object(
+      'discounted_price_paise', sl.discounted_price_paise,
+      'pickup_instructions', sl.pickup_instructions
+    )
+  )
+  FROM reservations r
+  JOIN surplus_listings sl ON sl.id = r.listing_id
+  WHERE r.secure_token = p_token
+    AND length(p_token) = 48
+  LIMIT 1;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_reservation(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_reservation(TEXT) TO anon, authenticated;
+
+-- Owner-only reservation state transitions. Collected/cancelled/expired restore stock.
+CREATE OR REPLACE FUNCTION public.transition_reservation(
+  p_reservation_id UUID,
+  p_status reservation_status
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r reservations%ROWTYPE;
+  listing_owner UUID;
+BEGIN
+  SELECT r2.*, sl.owner_id
+  INTO r, listing_owner
+  FROM reservations r2
+  JOIN surplus_listings sl ON sl.id = r2.listing_id
+  WHERE r2.id = p_reservation_id
+  FOR UPDATE OF r2;
+
+  IF listing_owner IS NULL OR listing_owner <> auth.uid() THEN
+    RAISE EXCEPTION 'Not authorized';
+  END IF;
+  IF p_status NOT IN ('confirmed', 'collected', 'cancelled', 'expired') THEN
+    RAISE EXCEPTION 'Invalid reservation status';
+  END IF;
+  IF r.status IN ('collected', 'cancelled', 'expired') THEN
+    RAISE EXCEPTION 'Final reservation status cannot change';
+  END IF;
+
+  IF p_status IN ('cancelled', 'expired') THEN
+    UPDATE surplus_listings
+    SET reserved_quantity = GREATEST(reserved_quantity - r.quantity, 0),
+        updated_at = now()
+    WHERE id = r.listing_id;
+  END IF;
+
+  UPDATE reservations
+  SET status = p_status, updated_at = now()
+  WHERE id = p_reservation_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.transition_reservation(UUID, reservation_status) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.transition_reservation(UUID, reservation_status) TO authenticated;
+
+-- Immutable ledger insertion with owner-derived identity and idempotency.
+CREATE OR REPLACE FUNCTION public.add_ledger_entry(
+  p_amount_paise INTEGER,
+  p_entry_type ledger_entry_type,
+  p_payment_method payment_method,
+  p_description TEXT,
+  p_entry_date DATE,
+  p_idempotency_key TEXT
+)
+RETURNS ledger_entries
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  entry ledger_entries%ROWTYPE;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_amount_paise IS NULL OR p_amount_paise <= 0 OR p_amount_paise > 100000000 THEN
+    RAISE EXCEPTION 'Amount must be between 1 paise and ₹1,000,000';
+  END IF;
+  IF length(trim(coalesce(p_idempotency_key, ''))) < 8
+     OR length(p_idempotency_key) > 100 THEN
+    RAISE EXCEPTION 'Idempotency key is required';
+  END IF;
+  IF p_entry_date IS NULL OR p_entry_date > CURRENT_DATE THEN
+    RAISE EXCEPTION 'Valid entry date is required';
+  END IF;
+
+  INSERT INTO ledger_entries (
+    owner_id, amount_paise, entry_type, payment_method,
+    description, entry_date, idempotency_key
+  ) VALUES (
+    auth.uid(), p_amount_paise, p_entry_type, p_payment_method,
+    nullif(left(trim(p_description), 500), ''), p_entry_date, p_idempotency_key
+  ) ON CONFLICT (idempotency_key) DO UPDATE
+    SET idempotency_key = EXCLUDED.idempotency_key
+  RETURNING * INTO entry;
+
+  RETURN entry;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.add_ledger_entry(INTEGER, ledger_entry_type, payment_method, TEXT, DATE, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.add_ledger_entry(INTEGER, ledger_entry_type, payment_method, TEXT, DATE, TEXT) TO authenticated;
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'product-images',
+  'product-images',
+  true,
+  5242880,
+  ARRAY['image/jpeg', 'image/png', 'image/webp']
+)
+ON CONFLICT (id) DO UPDATE
+SET public = true,
+    file_size_limit = 5242880,
+    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp'];
+
+CREATE POLICY "product_images_public_read"
+ON storage.objects FOR SELECT
+USING (bucket_id = 'product-images');
+
+CREATE POLICY "product_images_owner_insert"
+ON storage.objects FOR INSERT
+WITH CHECK (
+  bucket_id = 'product-images'
+  AND auth.role() = 'authenticated'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
+
+CREATE POLICY "product_images_owner_update"
+ON storage.objects FOR UPDATE
+USING (
+  bucket_id = 'product-images'
+  AND auth.role() = 'authenticated'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+)
+WITH CHECK (
+  bucket_id = 'product-images'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
+
+CREATE POLICY "product_images_owner_delete"
+ON storage.objects FOR DELETE
+USING (
+  bucket_id = 'product-images'
+  AND auth.role() = 'authenticated'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
+
+INSERT INTO support_resources (
+  title, title_ml, description, description_ml, official_url,
+  jurisdiction, tags, reviewer, verified_at, is_published
+) VALUES
+(
+  'PM SVANidhi Scheme',
+  'പിഎം സ്വനിധി പദ്ധതി',
+  'The Government of India offers collateral-free working capital loans to eligible street vendors. Verify current eligibility, interest subsidy, and application steps at the official portal.',
+  'യുക്തമായ തെരുവ് കച്ചവടക്കാർക്ക് കോപ്പിസ്ഥിത ഹരികൂടി ഒഴിവുള്ള കുടിശ്ശിക വായ്പകൾ ലഭിച്ചേക്കാം. ഇന്നത്തെ യോഗ്യതയും അപേക്ഷാ നടപടികളും ഔദ്യോഗിക പോർട്ടലിൽ പരിശോധിക്കുക.',
+  'https://pmsvanidhi.mohua.gov.in',
+  'National',
+  ARRAY['scheme','loan','street vendor'],
+  'Platform content reviewer',
+  '2026-10-01',
+  true
+),
+(
+  'Street Vendors Act, 2014',
+  'തെരുവ് കച്ചവടക്കാർ നിയമം, 2014',
+  'National framework for street-vendor rights, Town Vending Committees, certificate of vending, vending zones, and grievance redirection.',
+  'തെരുവ് കച്ചവടക്കാരുടെ അവകാശങ്ങളും ടൗൺ വെണ്ടിംഗ് കമ്മിറ്റി സവിശേഷതകളും സംസ്ഥാന നിയമങ്ങളും.',
+  'https://www.indiacode.nic.in/handle/123456789/2121',
+  'National',
+  ARRAY['rights','licensing','act'],
+  'Platform content reviewer',
+  '2026-10-01',
+  true
+),
+(
+  'FSSAI Food Safety Registration',
+  'FSSAI ഭക്ഷ്യസുരക്ഷ രജിസ്ട്രേഷൻ',
+  'Food businesses should verify whether they require basic registration or a licence based on annual turnover and business category. Use the official FoSCoS portal.',
+  'വാർഷിക വരുമാനത്തിനും പ്രവർത്തനവിഭാഗത്തിനും അനുസരിച്ച് ബേസിക് രജിസ്ട്രേഷൻ അല്ലെങ്കിൽ ലൈസൻസ് ആവശ്യമുണ്ടോ എന്ന് ഔദ്യോഗിക പോർട്ടലിൽ പരിശോധിക്കുക.',
+  'https://foscos.fssai.gov.in',
+  'National',
+  ARRAY['food','fssai','registration'],
+  'Platform content reviewer',
+  '2026-10-01',
+  true
+),
+(
+  'Kerala Local Government and Vending Guidance',
+  'കേരള സർക്കാരിന്റെ പ്രാദേശിക വിൽപ്പന മാർഗ്ഗനിർദ്ദേശം',
+  'Contact the relevant Kerala municipal or panchayat authority for local vending zones, permissions, and street-vending committee procedures.',
+  'പ്രാദേശിക വിൽപ്പന മേഖലകൾക്കും അനുമതികൾക്കും തെരുവ് കച്ചവടക്കാർ കമ്മിറ്റിക്കും ബന്ധപ്പെട്ട മുനിസിപ്പൽ അല്ലെങ്കിൽ പഞ്ചായത്തി അധികാര കേന്ദ്രത്തെ സമീപിക്കുക.',
+  'https://lsgkerala.gov.in',
+  'Kerala',
+  ARRAY['kerala','municipal','panchayat','local rules'],
+  'Platform content reviewer',
+  '2026-10-01',
+  true
+)
+ON CONFLICT DO NOTHING;

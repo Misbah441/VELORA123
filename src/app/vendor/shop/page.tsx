@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useEffect } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -14,6 +15,7 @@ import {
   Trash2,
   AlertTriangle,
 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -27,7 +29,7 @@ interface DayHours {
 }
 
 interface Product {
-  id: number;
+  id: string;
   name: string;
   unit: string;
   price: number; // ₹
@@ -49,12 +51,12 @@ const defaultHours: Record<DayKey, DayHours> = {
 };
 
 const initialProducts: Product[] = [
-  { id: 1, name: 'Tomatoes', unit: 'kg', price: 30, available: true },
-  { id: 2, name: 'Beans', unit: 'kg', price: 60, available: true },
-  { id: 3, name: 'Spinach', unit: 'bunch', price: 15, available: true },
-  { id: 4, name: 'Coconut', unit: 'piece', price: 25, available: false },
-  { id: 5, name: 'Raw Banana', unit: 'piece', price: 8, available: true },
-  { id: 6, name: 'Bitter Gourd', unit: 'kg', price: 40, available: true },
+  { id: '1', name: 'Tomatoes', unit: 'kg', price: 30, available: true },
+  { id: '2', name: 'Beans', unit: 'kg', price: 60, available: true },
+  { id: '3', name: 'Spinach', unit: 'bunch', price: 15, available: true },
+  { id: '4', name: 'Coconut', unit: 'piece', price: 25, available: false },
+  { id: '5', name: 'Raw Banana', unit: 'piece', price: 8, available: true },
+  { id: '6', name: 'Bitter Gourd', unit: 'kg', price: 40, available: true },
 ];
 
 // ── Toggle component ───────────────────────────────────────────────────────────
@@ -105,8 +107,8 @@ export default function ShopPage() {
   // Products state
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [addFormOpen, setAddFormOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [unpublishWarning, setUnpublishWarning] = useState(false);
 
   // New product form
@@ -119,9 +121,56 @@ export default function ShopPage() {
   const [editUnit, setEditUnit] = useState('kg');
   const [editPrice, setEditPrice] = useState('');
 
-  function handleSaveDetails() {
+  useEffect(() => {
+    const supabase = createClient();
+    void supabase.auth.getUser().then(async ({ data }) => {
+      const userId = data.user?.id;
+      if (!userId) return;
+      const { data: shop } = await supabase
+        .from('shops')
+        .select('id,name,description,category,stall_type,status,opening_hours')
+        .eq('owner_id', userId)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!shop) return;
+      setShopName(shop.name);
+      setDescription(shop.description || '');
+      setPublished(shop.status === 'published');
+      if (shop.opening_hours) setHours(shop.opening_hours as Record<DayKey, DayHours>);
+
+      const { data: rows } = await supabase
+        .from('products')
+        .select('id,name,unit,selling_price_paise,is_available')
+        .eq('shop_id', shop.id)
+        .order('created_at', { ascending: true });
+      setProducts((rows || []).map((row) => ({
+        id: row.id,
+        name: row.name,
+        unit: row.unit,
+        price: row.selling_price_paise / 100,
+        available: row.is_available,
+      })));
+    });
+  }, []);
+
+  async function handleSaveDetails() {
     setSavingDetails(true);
-    setTimeout(() => setSavingDetails(false), 1200);
+    const supabase = createClient();
+    const { data: user } = await supabase.auth.getUser();
+    const userId = user.user?.id;
+    if (userId) {
+      await supabase
+        .from('shops')
+        .update({
+          name: shopName,
+          description,
+          stall_type: stallType.toLowerCase(),
+          opening_hours: hours,
+        })
+        .eq('owner_id', userId);
+    }
+    setSavingDetails(false);
     setEditOpen(false);
   }
 
@@ -143,18 +192,43 @@ export default function ShopPage() {
     }));
   }
 
-  function handleAddProduct() {
+  async function handleAddProduct() {
     if (!newName.trim() || !newPrice) return;
-    setProducts((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        name: newName.trim(),
-        unit: newUnit,
-        price: parseFloat(newPrice),
-        available: true,
-      },
-    ]);
+    const supabase = createClient();
+    const { data: user } = await supabase.auth.getUser();
+    const userId = user.user?.id;
+    if (userId) {
+      const { data: shop } = await supabase
+        .from('shops')
+        .select('id')
+        .eq('owner_id', userId)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (shop) {
+        const { data: row } = await supabase
+          .from('products')
+          .insert({
+            shop_id: shop.id,
+            name: newName.trim(),
+            unit: newUnit,
+            selling_price_paise: Math.round(parseFloat(newPrice) * 100),
+            is_available: true,
+          })
+          .select('id')
+          .single();
+        setProducts((prev) => [
+          ...prev,
+          {
+            id: row?.id || crypto.randomUUID(),
+            name: newName.trim(),
+            unit: newUnit,
+            price: parseFloat(newPrice),
+            available: true,
+          },
+        ]);
+      }
+    }
     setNewName('');
     setNewUnit('kg');
     setNewPrice('');
@@ -168,7 +242,13 @@ export default function ShopPage() {
     setEditPrice(String(product.price));
   }
 
-  function handleSaveEdit(id: number) {
+  async function handleSaveEdit(id: string) {
+    const supabase = createClient();
+    await supabase.from('products').update({
+      name: editName.trim(),
+      unit: editUnit,
+      selling_price_paise: Math.round(parseFloat(editPrice) * 100),
+    }).eq('id', id);
     setProducts((prev) =>
       prev.map((p) =>
         p.id === id
@@ -179,21 +259,31 @@ export default function ShopPage() {
     setEditingId(null);
   }
 
-  function handleDelete(id: number) {
+  async function handleDelete(id: string) {
+    await createClient().from('products').delete().eq('id', id);
     setProducts((prev) => prev.filter((p) => p.id !== id));
     setDeleteConfirmId(null);
   }
 
-  function handleToggleAvailability(id: number) {
+  async function handleToggleAvailability(id: string) {
+    const current = products.find((product) => product.id === id);
+    if (current) {
+      await createClient().from('products').update({ is_available: !current.available }).eq('id', id);
+    }
     setProducts((prev) =>
       prev.map((p) => (p.id === id ? { ...p, available: !p.available } : p))
     );
   }
 
-  function handleTogglePublish() {
+  async function handleTogglePublish() {
     if (published) {
       setUnpublishWarning(true);
     } else {
+      const supabase = createClient();
+      const { data } = await supabase.auth.getUser();
+      if (data.user) {
+        await supabase.from('shops').update({ status: 'published' }).eq('owner_id', data.user.id);
+      }
       setPublished(true);
     }
   }
@@ -611,7 +701,12 @@ export default function ShopPage() {
                     <Button
                       variant="danger"
                       size="sm"
-                      onClick={() => {
+                      onClick={async () => {
+                        const supabase = createClient();
+                        const { data } = await supabase.auth.getUser();
+                        if (data.user) {
+                          await supabase.from('shops').update({ status: 'paused' }).eq('owner_id', data.user.id);
+                        }
                         setPublished(false);
                         setUnpublishWarning(false);
                       }}

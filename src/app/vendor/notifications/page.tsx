@@ -1,180 +1,85 @@
 'use client';
 
-import { useState } from 'react';
-import { Bell, Check, ArrowRight, Package, Store, ShoppingCart, MessageCircle, Sparkles } from 'lucide-react';
-import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { Bell, Check } from 'lucide-react';
+import { Card } from '@/components/ui/Card';
+import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { cn } from '@/lib/utils';
+import { createClient } from '@/lib/supabase/client';
 
-interface Notification {
+interface NotificationRow {
   id: string;
+  event_type: string;
   title: string;
-  relativeTime: string;
-  read: boolean;
-  actionUrl?: string;
-  actionLabel?: string;
-  icon: 'reservation' | 'surplus' | 'shop' | 'enquiry' | 'welcome';
+  body: string | null;
+  is_read: boolean;
+  created_at: string;
 }
 
-const iconMap: Record<Notification['icon'], React.ReactNode> = {
-  reservation: <ShoppingCart className="size-5" />,
-  surplus: <Package className="size-5" />,
-  shop: <Store className="size-5" />,
-  enquiry: <MessageCircle className="size-5" />,
-  welcome: <Sparkles className="size-5" />,
-};
-
-const initialNotifications: Notification[] = [
-  {
-    id: 'n1',
-    title: 'New reservation: Priya requested 2 kg of Tomatoes',
-    relativeTime: '30 min ago',
-    read: false,
-    actionUrl: '/vendor/reservations',
-    actionLabel: 'View reservations',
-    icon: 'reservation',
-  },
-  {
-    id: 'n2',
-    title: 'Surplus listing expiring soon: Raw banana closes in 1 hour',
-    relativeTime: '1 hour ago',
-    read: false,
-    actionUrl: '/vendor/surplus',
-    actionLabel: 'Manage surplus',
-    icon: 'surplus',
-  },
-  {
-    id: 'n3',
-    title: "Reservation confirmed: Suresh's Tomato 1 kg — collect by 6 PM",
-    relativeTime: '3 hours ago',
-    read: true,
-    icon: 'reservation',
-  },
-  {
-    id: 'n4',
-    title: 'New enquiry from anonymous visitor',
-    relativeTime: 'Yesterday',
-    read: true,
-    actionUrl: '/vendor/enquiries',
-    actionLabel: 'View enquiries',
-    icon: 'enquiry',
-  },
-  {
-    id: 'n5',
-    title: 'Shop published successfully',
-    relativeTime: '2 days ago',
-    read: true,
-    actionUrl: '/vendor/shop',
-    actionLabel: 'View shop',
-    icon: 'shop',
-  },
-  {
-    id: 'n6',
-    title: 'Welcome to VendorSpace! Complete your shop setup.',
-    relativeTime: '3 days ago',
-    read: true,
-    actionUrl: '/vendor/onboarding',
-    actionLabel: 'Go to setup',
-    icon: 'welcome',
-  },
-];
-
 export default function NotificationsPage() {
-  const [notifications, setNotifications] = useState<Notification[]>(initialNotifications);
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
-
-  function markAllRead() {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  async function load() {
+    setLoading(true);
+    const supabase = createClient();
+    const { data } = await supabase
+      .from('notifications')
+      .select('id,event_type,title,body,is_read,created_at')
+      .order('created_at', { ascending: false });
+    setNotifications((data || []) as unknown as NotificationRow[]);
+    setLoading(false);
   }
 
-  function markOneRead(id: string) {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-    );
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function markRead(id: string) {
+    await createClient().from('notifications').update({ is_read: true }).eq('id', id);
+    await load();
+  }
+
+  async function markAllRead() {
+    await createClient().from('notifications').update({ is_read: true }).eq('is_read', false);
+    await load();
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
-      {/* Header */}
+    <div className="max-w-3xl mx-auto px-4 py-8 space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-text-main">Notifications</h1>
-          {unreadCount > 0 && (
-            <p className="text-text-secondary mt-1 text-sm">
-              {unreadCount} unread notification{unreadCount !== 1 ? 's' : ''}
-            </p>
-          )}
+          <h1 className="text-2xl font-bold">Notifications</h1>
+          <p className="text-text-secondary mt-1">Reservation and account updates.</p>
         </div>
-        {unreadCount > 0 && (
-          <Button variant="ghost" size="sm" onClick={markAllRead}>
-            <Check className="size-4" /> Mark all as read
+        {notifications.some((item) => !item.is_read) && (
+          <Button size="sm" variant="secondary" onClick={() => void markAllRead()}>
+            <Check className="size-4" /> Mark all read
           </Button>
         )}
       </div>
-
-      {/* Notifications list */}
-      {notifications.length === 0 ? (
-        <EmptyState
-          icon={<Bell />}
-          title="All caught up"
-          description="No notifications to show right now."
-        />
+      {loading ? (
+        <p className="text-sm text-text-secondary">Loading notifications...</p>
+      ) : notifications.length === 0 ? (
+        <EmptyState icon={<Bell />} title="No notifications" description="Updates will appear here." />
       ) : (
-        <div className="space-y-2">
-          {notifications.map((notif) => (
-            <div
-              key={notif.id}
-              className={cn(
-                'flex gap-3 rounded-lg border p-4 transition-colors',
-                notif.read
-                  ? 'bg-surface border-divider'
-                  : 'bg-accent-surface border-l-4 border-l-accent-text border-divider'
-              )}
-            >
-              {/* Icon */}
-              <div
-                className={cn(
-                  'flex-shrink-0 size-9 rounded-full flex items-center justify-center',
-                  notif.read ? 'bg-muted text-text-secondary' : 'bg-primary/10 text-primary'
+        <div className="space-y-3">
+          {notifications.map((notification) => (
+            <Card key={notification.id} className={notification.is_read ? 'opacity-70' : ''}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold">{notification.title}</p>
+                  {notification.body && <p className="text-sm text-text-secondary mt-1">{notification.body}</p>}
+                  <p className="text-xs text-text-secondary mt-2">{new Date(notification.created_at).toLocaleString('en-IN')}</p>
+                </div>
+                {notification.is_read ? (
+                  <Badge variant="success">Read</Badge>
+                ) : (
+                  <Button size="sm" variant="ghost" onClick={() => void markRead(notification.id)}>Mark read</Button>
                 )}
-              >
-                {iconMap[notif.icon]}
               </div>
-
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                <p
-                  className={cn(
-                    'text-sm',
-                    notif.read ? 'text-text-secondary' : 'font-medium text-text-main'
-                  )}
-                >
-                  {notif.title}
-                </p>
-                <div className="flex flex-wrap items-center gap-3 mt-1.5">
-                  <span className="text-xs text-text-secondary">{notif.relativeTime}</span>
-                  {notif.actionUrl && (
-                    <Link
-                      href={notif.actionUrl}
-                      onClick={() => markOneRead(notif.id)}
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                    >
-                      {notif.actionLabel ?? 'View'}
-                      <ArrowRight className="size-3" />
-                    </Link>
-                  )}
-                </div>
-              </div>
-
-              {/* Unread dot */}
-              {!notif.read && (
-                <div className="flex-shrink-0 mt-1">
-                  <span className="size-2 rounded-full bg-primary block" />
-                </div>
-              )}
-            </div>
+            </Card>
           ))}
         </div>
       )}

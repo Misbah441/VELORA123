@@ -54,22 +54,28 @@ export default function VendorRegisterPage() {
     setFieldErrors({});
     setIsLoading(true);
     const supabase = createClient();
-    const { error: signUpError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          display_name: fullName.trim(),
-          preferred_language: language,
+    try {
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/vendor/onboarding`,
+          data: {
+            display_name: fullName.trim(),
+            preferred_language: language,
+          },
         },
-      },
-    });
-    setIsLoading(false);
-    if (signUpError) {
-      setError(signUpError.message);
-      return;
+      });
+      if (signUpError) {
+        setError(signUpError.message);
+        return;
+      }
+      setSubmitted(true);
+    } catch {
+      setError('Unable to register right now. Check your connection and try again.');
+    } finally {
+      setIsLoading(false);
     }
-    setSubmitted(true);
   }
 
   if (submitted) {
